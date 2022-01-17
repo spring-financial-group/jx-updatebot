@@ -71,7 +71,7 @@ func (o *Options) ApplyGo(dir string, gitURL string, change v1alpha1.Change, gc 
 				Name: "go",
 				Args: []string{"get", patch, line},
 			}
-			text, err = runner(c)
+			_, err = runner(c)
 			if err != nil {
 				log.Logger().Warnf("failed to update %s: %s", line, err.Error())
 			}
@@ -80,7 +80,7 @@ func (o *Options) ApplyGo(dir string, gitURL string, change v1alpha1.Change, gc 
 				Name: "go",
 				Args: []string{"mod", "tidy"},
 			}
-			text, err = runner(c)
+			_, err = runner(c)
 			if err != nil {
 				log.Logger().Warnf("failed to update %s: %s", line, err.Error())
 			}
