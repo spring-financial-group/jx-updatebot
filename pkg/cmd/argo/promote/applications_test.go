@@ -50,7 +50,7 @@ func TestModifyApplicationFiles(t *testing.T) {
 			}
 			expectedFile := filepath.Join(tmpDir, dir, "expected", name)
 			srcFile := filepath.Join(srcDir, name)
-			testhelpers.AssertEqualFileText(t, expectedFile, srcFile)
+			_ = testhelpers.AssertEqualFileText(t, expectedFile, srcFile)
 		}
 	}
 }

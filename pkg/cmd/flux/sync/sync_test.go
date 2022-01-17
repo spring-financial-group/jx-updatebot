@@ -69,7 +69,7 @@ func TestFluxSync(t *testing.T) {
 
 // AssertDirContentsEqual asserts that the directory matches the expected dir
 func AssertDirContentsEqual(t *testing.T, generateTestOutput, verbose bool, dir, expectedDir string) {
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err2 error) error {
 		if info == nil || info.IsDir() {
 			return nil
 		}
@@ -78,7 +78,7 @@ func AssertDirContentsEqual(t *testing.T, generateTestOutput, verbose bool, dir,
 		}
 
 		rel, err := filepath.Rel(dir, path)
-
+		require.NoError(t, err, "failed to make relative path %s", path)
 		expectedFile := filepath.Join(expectedDir, rel)
 		require.FileExists(t, path)
 

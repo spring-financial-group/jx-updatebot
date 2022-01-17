@@ -68,7 +68,8 @@ func TestModifyHelmReleaseFiles(t *testing.T) {
 				continue
 			}
 
-			testhelpers.AssertEqualFileText(t, expectedFile, srcFile)
+			_ = testhelpers.AssertEqualFileText(t, expectedFile, srcFile)
+
 		}
 	}
 }
