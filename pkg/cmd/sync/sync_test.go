@@ -1,11 +1,12 @@
 package sync_test
 
 import (
-	"github.com/jenkins-x/jx-helpers/v3/pkg/input/fake"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/jenkins-x/jx-helpers/v3/pkg/input/fake"
 
 	"github.com/jenkins-x-plugins/jx-gitops/pkg/helmfiles/testhelmfile"
 	"github.com/jenkins-x-plugins/jx-updatebot/pkg/cmd/sync"
