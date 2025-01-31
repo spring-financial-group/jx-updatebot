@@ -49,6 +49,7 @@ type Options struct {
 	GitCommitUsername  string
 	GitCommitUserEmail string
 	PipelineCommitSha  string
+	PipelineRepoURL    string
 	AutoMerge          bool
 	NoVersion          bool
 	GitCredentials     bool
@@ -86,6 +87,7 @@ func NewCmdPullRequest() (*cobra.Command, *Options) {
 	cmd.Flags().StringVarP(&o.GitCommitUsername, "git-user-name", "", "", "the user name to git commit")
 	cmd.Flags().StringVarP(&o.GitCommitUserEmail, "git-user-email", "", "", "the user email to git commit")
 	cmd.Flags().StringVarP(&o.PipelineCommitSha, "pipeline-commit-sha", "", os.Getenv("PULL_BASE_SHA"), "the git SHA of the commit that triggered the pipeline")
+	cmd.Flags().StringVarP(&o.PipelineRepoURL, "pipeline-repo-url", "", os.Getenv("REPO_URL"), "the git URL of the repository that triggered the pipeline")
 	cmd.Flags().StringSliceVar(&o.Labels, "labels", []string{}, "a list of labels to apply to the PR")
 	cmd.Flags().StringSliceVar(&o.PRAssignees, "pull-request-assign", []string{}, "Assignees of created PRs")
 	cmd.Flags().BoolVarP(&o.AutoMerge, "auto-merge", "", true, "should we automatically merge if the PR pipeline is green")
@@ -127,13 +129,8 @@ func (o *Options) Run() error {
 			return fmt.Errorf("failed to process rule #%d: %w", i, err)
 		}
 
-		err = o.ProcessRuleURLs(&rule, BaseBranchName)
-		if err != nil {
-			return fmt.Errorf("failed to process URLs: %w", err)
-		}
-		err = o.CreateOrReusePullRequests(&rule, o.Labels, o.AutoMerge)
-		if err != nil {
-			return fmt.Errorf("failed to create Pull Requests: %w", err)
+		if err := o.ProcessAndCreatePullRequests(&rule, BaseBranchName, o.Labels, o.AutoMerge); err != nil {
+			return fmt.Errorf("failed to create Pull Requests for rule #%d: %w", i, err)
 		}
 	}
 	return nil
@@ -379,38 +376,27 @@ func (o *Options) ProcessRule(rule *v1alpha1.Rule, index int) error {
 	return nil
 }
 
-// ProcessRuleURLs apply changes to the set of URLs in the given rule
-func (o *Options) ProcessRuleURLs(rule *v1alpha1.Rule, baseBranch string) error {
-	for _, gitURL := range rule.URLs {
-		if gitURL == "" {
+// ProcessAndCreatePullRequests handles the URL loop, sets the closure, and creates/reuses PRs.
+func (o *Options) ProcessAndCreatePullRequests(rule *v1alpha1.Rule, baseBranch string, labels []string, automerge bool) error {
+	for _, url := range rule.URLs {
+		if url == "" {
 			log.Logger().Warnf("skipping empty git URL")
 			continue
 		}
-
+		ruleURL := url
 		o.BranchName = ""
 		o.BaseBranchName = baseBranch
 
 		o.Function = func() error {
 			dir := o.OutDir
 			for _, ch := range rule.Changes {
-				err := o.ApplyChanges(dir, gitURL, ch)
-				if err != nil {
+				if err := o.ApplyChanges(dir, ruleURL, ch); err != nil {
 					return fmt.Errorf("failed to apply change: %w", err)
 				}
 			}
 			return nil
 		}
-	}
-	return nil
-}
 
-// CreateOrReusePullRequests creates or reuses a PR on each of the given rule URLs
-func (o *Options) CreateOrReusePullRequests(rule *v1alpha1.Rule, labels []string, automerge bool) error {
-	for _, gitURL := range rule.URLs {
-		if gitURL == "" {
-			log.Logger().Warnf("skipping empty git URL")
-			continue
-		}
 		if rule.ReusePullRequest {
 			if len(o.Labels) == 0 {
 				return fmt.Errorf("to be able to reuse pull request you need to supply pullRequestLabels in config file or --labels")
@@ -424,11 +410,14 @@ func (o *Options) CreateOrReusePullRequests(rule *v1alpha1.Rule, labels []string
 			}
 		}
 
-		pr, err := o.EnvironmentPullRequestOptions.Create(gitURL, "", labels, automerge)
+		pr, err := o.EnvironmentPullRequestOptions.Create(ruleURL, "", labels, automerge)
 		if err != nil {
-			return fmt.Errorf("failed to create Pull Request on repository %s: %w", gitURL, err)
+			return fmt.Errorf("failed to create Pull Request on repository %s: %w", ruleURL, err)
 		}
-		err = o.AssignUsersToPullRequestIssue(rule, pr, gitURL, o.PipelineCommitSha, o.GitKind)
+		if pr != nil {
+			o.AddPullRequest(pr)
+		}
+		err = o.AssignUsersToPullRequestIssue(rule, pr, o.PipelineRepoURL, o.PipelineCommitSha, ruleURL, o.GitKind)
 		if err != nil {
 			return fmt.Errorf("failed to assign users to PR: %w", err)
 		}
@@ -437,13 +426,13 @@ func (o *Options) CreateOrReusePullRequests(rule *v1alpha1.Rule, labels []string
 }
 
 // AssignUsersToPullRequestIssue assigns user to a downstream PR issue
-func (o *Options) AssignUsersToPullRequestIssue(rule *v1alpha1.Rule, pullRequest *scm.PullRequest, gitURL, pipelineSHA, gitKind string) error {
+func (o *Options) AssignUsersToPullRequestIssue(rule *v1alpha1.Rule, pullRequest *scm.PullRequest, pipelineRepoURL, pipelineSHA, ruleURL, gitKind string) error {
 	var assignees []string
 	for _, pullRequestAssignee := range rule.PullRequestAssignees {
 		assignees = stringhelpers.EnsureStringArrayContains(assignees, pullRequestAssignee)
 	}
 	if rule.AssignAuthorToPullRequests {
-		author, err := o.FindCommitAuthor(gitURL, pipelineSHA, gitKind)
+		author, err := o.FindCommitAuthor(pipelineRepoURL, pipelineSHA, gitKind)
 		if err != nil {
 			return fmt.Errorf("failed to find commit author: %w", err)
 		}
@@ -452,7 +441,7 @@ func (o *Options) AssignUsersToPullRequestIssue(rule *v1alpha1.Rule, pullRequest
 		}
 	}
 	if len(assignees) > 0 {
-		err := o.AssignUsersToIssue(pullRequest, assignees, gitURL, gitKind)
+		err := o.AssignUsersToIssue(pullRequest, assignees, ruleURL, gitKind)
 		if err != nil {
 			return fmt.Errorf("failed to assign users to PR: %w", err)
 		}
@@ -460,10 +449,10 @@ func (o *Options) AssignUsersToPullRequestIssue(rule *v1alpha1.Rule, pullRequest
 	return nil
 }
 
-// FindCommitAuthor finds the author for the given commit SHA
-func (o *Options) FindCommitAuthor(gitURL, sha, gitKind string) (string, error) {
+// FindCommitAuthor finds the author for the given commit SHA on the pipeline URL
+func (o *Options) FindCommitAuthor(pipelineRepoURL, sha, gitKind string) (string, error) {
 	ctx := context.Background()
-	scmClient, repoFullName, err := o.GetScmClient(gitURL, gitKind)
+	scmClient, repoFullName, err := o.GetScmClient(pipelineRepoURL, gitKind)
 	if err != nil {
 		return "", fmt.Errorf("failed to create ScmClient: %w", err)
 	}
