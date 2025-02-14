@@ -1,6 +1,7 @@
 package pr_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,26 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// FakeGitService implements the scm.GitService interface using fake data
+type FakeGitService struct {
+	scm.GitService
+	Data *fake.Data
+}
+
+// ListCommits returns the commits from the fake data's CommitMap for the given repo
+func (f *FakeGitService) ListCommits(_ context.Context, repo string, _ scm.CommitListOptions) ([]*scm.Commit, *scm.Response, error) {
+	commits, ok := f.Data.CommitMap[repo]
+	if !ok || len(commits) == 0 {
+		return nil, nil, scm.ErrNotFound
+	}
+	var result []*scm.Commit
+	for i := range commits {
+		commit := &commits[i]
+		result = append(result, commit)
+	}
+	return result, nil, nil
+}
 
 func TestCreate(t *testing.T) {
 	ev := os.Getenv("JX_EXCLUDE_TEST")
@@ -66,6 +87,9 @@ func TestCreate(t *testing.T) {
 		o.ScmClientFactory.NoWriteGitCredentialsFile = true
 		o.Helmer = fakeHelmer
 		o.Version = "1.2.3"
+		o.PipelineRepoURL = "https://github.com/jx3-gitops-repositories/jx3-kubernetes"
+		o.PipelineBaseRef = "main"
+		o.GitKind = "fake"
 		o.EnvironmentPullRequestOptions.ScmClientFactory.GitServerURL = "https://github.com"
 		o.EnvironmentPullRequestOptions.ScmClientFactory.GitToken = "dummytoken"
 		o.EnvironmentPullRequestOptions.ScmClientFactory.GitUsername = "dummyuser"
@@ -102,15 +126,9 @@ func TestAssignAuthorToCommit(t *testing.T) {
 		fakeScmClient, fakeData := fake.NewDefault()
 
 		// Prepopulate fake data
-		fakeData.Commits["dummy-sha"] = &scm.Commit{
-			Sha: "dummy-sha",
-			Author: scm.Signature{
-				Login: "test-author",
-			},
-		}
-		fakeData.PullRequests[1] = &scm.PullRequest{
-			Number: 1,
-			Title:  "Test PR",
+		fakeData.CommitMap["jx3-gitops-repositories/jx3-kubernetes"] = []scm.Commit{
+			{Sha: "dummy-sha", Author: scm.Signature{Login: "irrelevant"}},
+			{Sha: "parent-sha", Author: scm.Signature{Login: "test-author"}},
 		}
 
 		fakeData.AssigneesAdded = []string{}
@@ -138,6 +156,12 @@ func TestAssignAuthorToCommit(t *testing.T) {
 		o.EnvironmentPullRequestOptions.ScmClientFactory.GitServerURL = "https://github.com"
 		o.EnvironmentPullRequestOptions.ScmClientFactory.GitToken = "dummytoken"
 		o.EnvironmentPullRequestOptions.ScmClientFactory.GitUsername = "dummyuser"
+		o.PipelineRepoURL = "https://github.com/jx3-gitops-repositories/jx3-kubernetes"
+		o.PipelineBaseRef = "main"
+		o.GitKind = "fake"
+
+		// Override the Git service to avoid the "implement me" panic
+		fakeScmClient.Git = &FakeGitService{Data: fakeData}
 
 		// Run the command
 		err = o.Run()
