@@ -1,6 +1,7 @@
 package pr_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,20 +19,55 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// FakeGitService implements the scm.GitService interface using fake data
+type FakeGitService struct {
+	scm.GitService
+	Data *fake.Data
+}
+
+// ListCommits returns the commits from the fake data's CommitMap for the given repo
+func (f *FakeGitService) ListCommits(_ context.Context, repo string, _ scm.CommitListOptions) ([]*scm.Commit, *scm.Response, error) {
+	commits, ok := f.Data.CommitMap[repo]
+	if !ok || len(commits) == 0 {
+		return nil, nil, scm.ErrNotFound
+	}
+	var result []*scm.Commit
+	for i := range commits {
+		commit := &commits[i]
+		result = append(result, commit)
+	}
+	return result, nil, nil
+}
+
 func TestCreate(t *testing.T) {
 	ev := os.Getenv("JX_EXCLUDE_TEST")
 	if ev == "" {
-		ev = "go,assignauthor"
+		ev = "go"
 	}
 	excludeTests := strings.Split(ev, ",")
 	runner := &fakerunner.FakeRunner{
 		CommandRunner: func(c *cmdrunner.Command) (string, error) {
-			if c.Name == "git" && len(c.Args) > 0 && c.Args[0] == "push" {
-				t.Logf("faking command %s in dir %s\n", c.CLI(), c.Dir)
-				return "", nil
+			if c.Name == "git" {
+				// intercept push commands as before
+				if len(c.Args) > 0 && c.Args[0] == "push" {
+					t.Logf("faking command %s in dir %s\n", c.CLI(), c.Dir)
+					return "", nil
+				}
+				// intercept git log commands to simulate a non-merge commit with a parent hash and fake author
+				if len(c.Args) > 0 && c.Args[0] == "log" {
+					args := strings.Join(c.Args, " ")
+					if strings.Contains(args, "--pretty=%P") {
+						t.Logf("faking command %s in dir %s\n", c.CLI(), c.Dir)
+						// Return the parent commit hash that matches our fake commit data.
+						return "parent-sha", nil
+					}
+					if strings.Contains(args, "--pretty=%an") {
+						t.Logf("faking command %s in dir %s\n", c.CLI(), c.Dir)
+						// Return the expected commit author.
+						return "test-author", nil
+					}
+				}
 			}
-
-			// lets really git clone but then fake out all other commands
 			return cmdrunner.DefaultCommandRunner(c)
 		},
 	}
@@ -66,6 +102,7 @@ func TestCreate(t *testing.T) {
 		o.ScmClientFactory.NoWriteGitCredentialsFile = true
 		o.Helmer = fakeHelmer
 		o.Version = "1.2.3"
+		o.GitKind = "fake"
 		o.EnvironmentPullRequestOptions.ScmClientFactory.GitServerURL = "https://github.com"
 		o.EnvironmentPullRequestOptions.ScmClientFactory.GitToken = "dummytoken"
 		o.EnvironmentPullRequestOptions.ScmClientFactory.GitUsername = "dummyuser"
@@ -102,24 +139,33 @@ func TestAssignAuthorToCommit(t *testing.T) {
 		fakeScmClient, fakeData := fake.NewDefault()
 
 		// Prepopulate fake data
-		fakeData.Commits["dummy-sha"] = &scm.Commit{
-			Sha: "dummy-sha",
-			Author: scm.Signature{
-				Login: "test-author",
-			},
-		}
-		fakeData.PullRequests[1] = &scm.PullRequest{
-			Number: 1,
-			Title:  "Test PR",
+		fakeData.CommitMap["jx3-gitops-repositories/jx3-kubernetes"] = []scm.Commit{
+			{Sha: "dummy-sha", Author: scm.Signature{Login: "irrelevant"}},
+			{Sha: "parent-sha", Author: scm.Signature{Login: "test-author"}},
 		}
 
 		fakeData.AssigneesAdded = []string{}
 
 		runner := &fakerunner.FakeRunner{
 			CommandRunner: func(c *cmdrunner.Command) (string, error) {
-				if c.Name == "git" && len(c.Args) > 0 && c.Args[0] == "push" {
-					t.Logf("faking command %s in dir %s\n", c.CLI(), c.Dir)
-					return "", nil
+				if c.Name == "git" {
+					// Intercept push commands
+					if len(c.Args) > 0 && c.Args[0] == "push" {
+						t.Logf("faking command %s in dir %s\n", c.CLI(), c.Dir)
+						return "", nil
+					}
+					// Intercept log commands
+					if len(c.Args) > 0 && c.Args[0] == "log" {
+						argsStr := strings.Join(c.Args, " ")
+						if strings.Contains(argsStr, "--pretty=%P") {
+							t.Logf("faking command %s in dir %s\n", c.CLI(), c.Dir)
+							return "parent-sha", nil
+						}
+						if strings.Contains(argsStr, "--pretty=%an") {
+							t.Logf("faking command %s in dir %s\n", c.CLI(), c.Dir)
+							return "test-author", nil
+						}
+					}
 				}
 				return cmdrunner.DefaultCommandRunner(c)
 			},
@@ -133,11 +179,13 @@ func TestAssignAuthorToCommit(t *testing.T) {
 		o.ScmClientFactory.ScmClient = fakeScmClient
 		o.ScmClientFactory.NoWriteGitCredentialsFile = true
 		o.Version = "1.2.3"
-		o.PipelineCommitSha = "dummy-sha"
-		o.PipelineRepoURL = "https://github.com/testorg/testing.git"
 		o.EnvironmentPullRequestOptions.ScmClientFactory.GitServerURL = "https://github.com"
 		o.EnvironmentPullRequestOptions.ScmClientFactory.GitToken = "dummytoken"
 		o.EnvironmentPullRequestOptions.ScmClientFactory.GitUsername = "dummyuser"
+		o.GitKind = "fake"
+
+		// Override the Git service to avoid the "implement me" panic
+		fakeScmClient.Git = &FakeGitService{Data: fakeData}
 
 		// Run the command
 		err = o.Run()

@@ -48,8 +48,6 @@ type Options struct {
 	AddChangelog       string
 	GitCommitUsername  string
 	GitCommitUserEmail string
-	PipelineCommitSha  string
-	PipelineRepoURL    string
 	AutoMerge          bool
 	NoVersion          bool
 	GitCredentials     bool
@@ -86,8 +84,6 @@ func NewCmdPullRequest() (*cobra.Command, *Options) {
 	cmd.Flags().StringVar(&o.CommitMessage, "pull-request-body", "", "the PR body")
 	cmd.Flags().StringVarP(&o.GitCommitUsername, "git-user-name", "", "", "the user name to git commit")
 	cmd.Flags().StringVarP(&o.GitCommitUserEmail, "git-user-email", "", "", "the user email to git commit")
-	cmd.Flags().StringVarP(&o.PipelineCommitSha, "pipeline-commit-sha", "", os.Getenv("PULL_BASE_SHA"), "the git SHA of the commit that triggered the pipeline")
-	cmd.Flags().StringVarP(&o.PipelineRepoURL, "pipeline-repo-url", "", os.Getenv("REPO_URL"), "the git URL of the repository that triggered the pipeline")
 	cmd.Flags().StringSliceVar(&o.Labels, "labels", []string{}, "a list of labels to apply to the PR")
 	cmd.Flags().StringSliceVar(&o.PRAssignees, "pull-request-assign", []string{}, "Assignees of created PRs")
 	cmd.Flags().BoolVarP(&o.AutoMerge, "auto-merge", "", true, "should we automatically merge if the PR pipeline is green")
@@ -416,7 +412,7 @@ func (o *Options) ProcessAndCreatePullRequests(rule *v1alpha1.Rule, baseBranch s
 		if pr != nil {
 			o.AddPullRequest(pr)
 		}
-		err = o.AssignUsersToPullRequestIssue(rule, pr, ruleURL, o.PipelineRepoURL, o.PipelineCommitSha, o.GitKind)
+		err = o.AssignUsersToPullRequestIssue(rule, pr, o.EnvironmentPullRequestOptions.Gitter, ruleURL, o.GitKind, o.Dir)
 		if err != nil {
 			return fmt.Errorf("failed to assign users to PR: %w", err)
 		}
@@ -425,19 +421,18 @@ func (o *Options) ProcessAndCreatePullRequests(rule *v1alpha1.Rule, baseBranch s
 }
 
 // AssignUsersToPullRequestIssue assigns user to a downstream PR issue
-func (o *Options) AssignUsersToPullRequestIssue(rule *v1alpha1.Rule, pullRequest *scm.PullRequest, ruleURL, pipelineURL, pipelineSHA, gitKind string) error {
+func (o *Options) AssignUsersToPullRequestIssue(rule *v1alpha1.Rule, pullRequest *scm.PullRequest, g gitclient.Interface, ruleURL, gitKind, dir string) error {
 	var assignees []string
 	for _, pullRequestAssignee := range rule.PullRequestAssignees {
 		assignees = stringhelpers.EnsureStringArrayContains(assignees, pullRequestAssignee)
 	}
 	if rule.AssignAuthorToPullRequests {
-		author, err := o.FindCommitAuthor(pipelineURL, pipelineSHA, gitKind)
+		author, err := o.FindCommitAuthor(g, dir)
 		if err != nil {
-			return fmt.Errorf("failed to find commit author: %w", err)
+			return fmt.Errorf("failed to find pull request details: %w", err)
 		}
-		if author != "" {
-			assignees = stringhelpers.EnsureStringArrayContains(assignees, author)
-		}
+		log.Logger().Infof("author assigned: %s", author)
+		assignees = stringhelpers.EnsureStringArrayContains(assignees, author)
 	}
 	if len(assignees) > 0 {
 		err := o.AssignUsersToIssue(pullRequest, assignees, ruleURL, gitKind)
@@ -448,22 +443,39 @@ func (o *Options) AssignUsersToPullRequestIssue(rule *v1alpha1.Rule, pullRequest
 	return nil
 }
 
-// FindCommitAuthor finds the author for the given commit SHA
-func (o *Options) FindCommitAuthor(gitURL, sha, gitKind string) (string, error) {
-	ctx := context.Background()
-	scmClient, repoFullName, err := o.GetScmClient(gitURL, gitKind)
+// FindOriginalPRAuthor finds the original author of a pull request by looking at the commit ancestry
+func (o *Options) FindOriginalPRAuthor(g gitclient.Interface, dir, firstParentCommit string) (string, error) {
+	ancestryPath := "..." + firstParentCommit
+	pathAuthors, err := g.Command(dir, "log", "--ancestry-path", ancestryPath, "--reverse", "--pretty=%an")
 	if err != nil {
-		return "", fmt.Errorf("failed to create ScmClient: %w", err)
+		return "", fmt.Errorf("failed to get commit path from first parent: %w", err)
 	}
+	authorList := strings.Split(pathAuthors, "\n")
+	return authorList[0], nil
+}
 
-	commit, _, err := scmClient.Git.FindCommit(ctx, repoFullName, sha)
+// FindCommitAuthor determines the author of a commit, handling both merge and non-merge commits
+func (o *Options) FindCommitAuthor(g gitclient.Interface, dir string) (string, error) {
+	// Check if the current commit is a merge commit with git log
+	parentCommits, err := g.Command(dir, "log", "-1", "--pretty=%P")
 	if err != nil {
-		return "", fmt.Errorf("failed to find commit %s: %w", sha, err)
+		return "", fmt.Errorf("failed to get parent commit(s): %w", err)
 	}
-
-	author := commit.Author.Login
-	if author == "" {
-		log.Logger().Warnf("no author found for commit %s", sha)
+	commitParents := strings.Split(parentCommits, " ")
+	log.Logger().Infof("Parent commit(s): %s", commitParents)
+	// If the commit has more than one parent, it is a merge commit
+	if len(commitParents) > 1 {
+		log.Logger().Infof("detected merge commit, checking for author of the pull request")
+		author, err := o.FindOriginalPRAuthor(g, dir, commitParents[0])
+		if err != nil {
+			return "", fmt.Errorf("failed to find author of PR for merge commit: %w", err)
+		}
+		return author, nil
+	}
+	log.Logger().Infof("detected non-merge commit, looking up the current commit's author")
+	author, err := gitclient.GetLatestCommitAuthor(g, dir)
+	if err != nil {
+		return "", fmt.Errorf("failed to get latest commit author: %w", err)
 	}
 	return author, nil
 }
