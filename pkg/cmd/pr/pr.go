@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/jenkins-x-plugins/jx-gitops/pkg/cmd/git/setup"
@@ -448,7 +449,7 @@ func (o *Options) AssignUsersToPullRequestIssue(rule *v1alpha1.Rule, pullRequest
 	return nil
 }
 
-// FindCommitAuthor finds the author for the given commit SHA
+// FindCommitAuthor finds the author of the commit, or the author of the PR if the commit is a merge commit
 func (o *Options) FindCommitAuthor(gitURL, sha, gitKind string) (string, error) {
 	ctx := context.Background()
 	scmClient, repoFullName, err := o.GetScmClient(gitURL, gitKind)
@@ -459,6 +460,15 @@ func (o *Options) FindCommitAuthor(gitURL, sha, gitKind string) (string, error) 
 	commit, _, err := scmClient.Git.FindCommit(ctx, repoFullName, sha)
 	if err != nil {
 		return "", fmt.Errorf("failed to find commit %s: %w", sha, err)
+	}
+
+	// If the commit is a merge commit, find the author of the PR that created it
+	if isMergeCommit(commit) {
+		prNumber, err := MergeCommitPullRequestNumber(commit)
+		if err != nil {
+			return "", fmt.Errorf("failed to get PR number from merge commit: %w", err)
+		}
+		return FindPullRequestAuthor(scmClient, repoFullName, prNumber)
 	}
 
 	author := commit.Author.Login
@@ -480,4 +490,32 @@ func (o *Options) AssignUsersToIssue(pullRequest *scm.PullRequest, users []strin
 		return fmt.Errorf("failed to assign user to PR %d: %w", pullRequest.Number, err)
 	}
 	return nil
+}
+
+func isMergeCommit(commit *scm.Commit) bool {
+	return strings.HasPrefix(commit.Message, "Merge pull request")
+}
+
+func MergeCommitPullRequestNumber(commit *scm.Commit) (string, error) {
+	if !isMergeCommit(commit) {
+		return "", nil
+	}
+	// The commit message should look like "Merge pull request #123 from org/repo"
+	parts := strings.Split(commit.Message, " ")
+	if len(parts) < 5 {
+		return "", fmt.Errorf("invalid merge commit message: %s", commit.Message)
+	}
+	return strings.TrimPrefix(parts[3], "#"), nil
+}
+
+func FindPullRequestAuthor(scmClient *scm.Client, repoFullName string, prNumberStr string) (string, error) {
+	prNumber, err := strconv.Atoi(prNumberStr)
+	if err != nil {
+		return "", fmt.Errorf("invalid pull request number %q: %w", prNumberStr, err)
+	}
+	pr, _, err := scmClient.PullRequests.Find(context.Background(), repoFullName, prNumber)
+	if err != nil {
+		return "", fmt.Errorf("failed to find PR %d: %w", prNumber, err)
+	}
+	return pr.Author.Login, nil
 }
