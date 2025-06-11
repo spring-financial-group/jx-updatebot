@@ -125,16 +125,25 @@ func (o *Options) Run() error {
 
 	BaseBranchName := o.BaseBranchName
 
+	var ruleHasErrored bool
 	for i, rule := range o.UpdateConfig.Spec.Rules {
 		err = o.ProcessRule(&rule, i)
 		if err != nil {
-			return fmt.Errorf("failed to process rule #%d: %w", i, err)
+			log.Logger().Errorf("failed to process rule #%d: %v", i, err)
+			ruleHasErrored = true
+			continue
 		}
 
 		if err := o.ProcessAndCreatePullRequests(&rule, BaseBranchName, o.Labels, o.AutoMerge); err != nil {
-			return fmt.Errorf("failed to create Pull Requests for rule #%d: %w", i, err)
+			log.Logger().Errorf("failed to process rule #%d: %v", i, err)
+			ruleHasErrored = true
+			continue
 		}
 	}
+	if ruleHasErrored {
+		return fmt.Errorf("one or more rules failed to process, see the logs for details")
+	}
+
 	return nil
 }
 
